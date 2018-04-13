@@ -33,11 +33,13 @@ setControlCHook(chandler)
 
 proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int] =
   result = (command & "\n\n", -1)
-  var p = startProcess(command, options={poStdErrToStdOut, poUsePath, poEvalCommand})
-  var outp = p.outputStream()
-  var line = newStringOfCap(120)
   let start = cpuTime()
-  var killed = false
+  var
+    p = startProcess(command, options={poStdErrToStdOut, poUsePath, poEvalCommand})
+    outp = p.outputStream()
+    line = newStringOfCap(120)
+    killed = false
+
   while p.peekExitCode() == -1:
     sleep(10)
     if p.hasData():
@@ -128,8 +130,10 @@ proc isCrash(issue: JsonNode): bool =
   if "pull_request" in issue:
     return false
 
-  let title = ($issue["title"]).toLowerAscii()
-  let body = ($issue["body"]).toLowerAscii()
+  let
+    title = ($issue["title"]).toLowerAscii()
+    body = ($issue["body"]).toLowerAscii()
+
   for ctype in ["crash", " ice ", "internal error"]:
     if ctype in title or ctype in body:
       return true
@@ -151,9 +155,11 @@ proc getSnippet(issue: JsonNode): string =
   result = ""
   let body = $issue["body"]
   if body != "":
-    var notnim = false
-    var start = -1
-    var endl = -1
+    var
+      notnim = false
+      start = -1
+      endl = -1
+
     if "```nim" in body:
       start = body.find("```nim") + 6
     elif "```" in body:
@@ -175,11 +181,15 @@ proc checkIssue(issue: JsonNode, verbose, write: bool, nimfile: string) {.gcsafe
 
   if isCrash(issue):
     let snippet = getSnippet(issue)
-    var output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
-    var outverb = ""
+    var
+      output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
+      outverb = ""
+
     if snippet != "":
-      let nimout = run($issue["number"], snippet, nimfile, isNewruntime(issue)).strip()
-      let nimoutlc = nimout.toLowerAscii()
+      let
+        nimout = run($issue["number"], snippet, nimfile, isNewruntime(issue)).strip()
+        nimoutlc = nimout.toLowerAscii()
+
       if "internal error" in nimoutlc or "illegal storage" in nimoutlc:
         output = "CRASHED" & output
       elif "timed out" in nimoutlc:
@@ -209,9 +219,11 @@ $#
       writeFile(joinPath("logs", output[0..<7] & "-" & $issue["number"] & ".txt"), outverb)
 
 proc checkAll() =
-  var page = 1
+  var
+    page = 1
+    issues: JsonNode
+
   while true:
-    var issues: JsonNode
     try:
       issues = getIssues(page)
     except ProtocolError:
