@@ -1,28 +1,46 @@
 import httpclient, json, os, ospaths, osproc, streams, strutils, threadpool,
   times, uri
 
-var NIMFILE = ""
-var ISSUE = 0
-var VERBOSE = false
-var WRITE = false
+var
+  COMMENT = false
+  DEBUG = false
+  DIRECTION = "asc"
+  FIRST = 1
+  ISSUE = 0
+  LAST = -1
+  NIM = ""
+  NIMTEMP = ""
+  PER_PAGE = 100
+  TIMEOUT = 10
+  TOKEN = ""
+  VERBOSE = false
+  WRITE = false
 
 let HELP = """
 Test failing snippets from Nim's issues
 
-tissue [nimdir] [issueid] [-o] [-v]
+tissue [nimdir] [issueid] [tokenfile] [-dhov] [-fln#]
 
-  If path specified on command line:
-    First look for path\bin\nim_temp
-    Next look for path\bin\nim
+  If nimdir specified on command line:
+    Look for nimdir\bin\nim
+    Look for nimdir\bin\nim_temp
 
-  If neither found:
-    Look for nim_temp in path
+  If either not found:
     Look for nim in path
+    Look for nim_temp in path
 
   If no issue ID, run through all issues
 
-  -o  write verbose output to logs\issueid.txt
-  -v  write verbose output to stdout
+  If -c specified, require tokenfile which contains github auth token
+
+  -c      post comment on issue with run details
+  -d      sort in descending order [default: asc]
+  -f#     page number to start [default: 1]
+  -n#     number of issues per page [default: 100/max]
+  -l#     page to stop processing
+  -o      write verbose output to logs\issueid.txt
+  -t#     timeout in seconds before process is killed [default: 10]
+  -v      write verbose output to stdout
   -h"""
 
 # CTRL-C handler
@@ -31,8 +49,12 @@ proc chandler() {.noconv.} =
     quit(1)
 setControlCHook(chandler)
 
+template decho(params: varargs[untyped]) =
+  if DEBUG:
+    echo params
+
 proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int] =
-  result = (command & "\n\n", -1)
+  result = ("", -1)
   let start = cpuTime()
   var
     p = startProcess(command, options={poStdErrToStdOut, poUsePath, poEvalCommand})
@@ -52,6 +74,10 @@ proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int
       killed = true
       break
 
+  while outp.readLine(line):
+    result[0].add(line)
+    result[0].add("\n")
+
   result[1] = p.peekExitCode()
 
   if killed:
@@ -59,10 +85,15 @@ proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int
     result[1] = -1
   p.close()
 
-proc run(issueid, snippet, nimfile: string, newruntime = false): string =
+  result[0] = result[0].strip()
+
+proc run(issueid, snippet, nim: string, newruntime = false): string =
   result = ""
+  if nim.len() == 0:
+    return
+
   var
-    cmd = nimfile & " c "
+    cmd = nim & " c "
     error = -1
 
   if newruntime:
@@ -79,10 +110,10 @@ proc run(issueid, snippet, nimfile: string, newruntime = false): string =
   f.close()
 
   try:
-    (result, error) = execCmdTimer(cmd, 10)
+    (result, error) = execCmdTimer(cmd, TIMEOUT)
     if error == 0:
       try:
-        (result, error) = execCmdTimer(codefile, 10)
+        (result, error) = execCmdTimer(codefile, TIMEOUT)
       except OSError:
         result = "Failed to run"
   except OSError:
@@ -92,7 +123,10 @@ proc run(issueid, snippet, nimfile: string, newruntime = false): string =
   if error == -1:
     sleep(1000)
 
-  removeDir(tempDir)
+  try:
+    removeDir(tempDir)
+  except:
+    decho "Failed to delete " & tempDir
   return result
 
 proc getProxy(): Proxy =
@@ -117,22 +151,42 @@ proc getProxy(): Proxy =
     return nil
 
 proc getIssues(page = 1): JsonNode =
+  decho "Getting page $# @ $# per page" % [$page, $PER_PAGE]
   return newHttpClient(proxy = getProxy()).
-    getContent("https://api.github.com/repos/nim-lang/nim/issues?page=" & $page).
-    parseJson()
+    getContent("https://api.github.com/repos/nim-lang/nim/issues?direction=$#&per_page=$#&page=$#" %
+      [DIRECTION, $PER_PAGE, $page]).parseJson()
 
 proc getIssue(issue: int): JsonNode =
+  decho "Getting issue $#" % $issue
   return newHttpClient(proxy = getProxy()).
     getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue).
     parseJson()
+
+proc getAuth(token: string): HttpHeaders =
+  return newHttpHeaders({"Authorization": "token " & token})
+
+proc commentIssue(issueid, text, token: string) =
+  var body = %*
+    {
+      "body": text
+    }
+  decho "Commenting on issue " & issueid
+
+  var cl = newHttpClient(proxy = getProxy())
+  cl.headers = getAuth(token)
+  var res = cl.request("https://api.github.com/repos/nim-lang/nim/issues/$#/comments" % issueid,
+    httpMethod = HttpPost, body = $body)
+  if "201" notin res.status:
+    echo "Failed to create comment"
+    echo res.body
 
 proc isCrash(issue: JsonNode): bool =
   if "pull_request" in issue:
     return false
 
   let
-    title = ($issue["title"]).toLowerAscii()
-    body = ($issue["body"]).toLowerAscii()
+    title = issue["title"].getStr().toLowerAscii()
+    body = issue["body"].getStr().toLowerAscii()
 
   for ctype in ["crash", " ice ", "internal error"]:
     if ctype in title or ctype in body:
@@ -145,25 +199,31 @@ proc isCrash(issue: JsonNode): bool =
   return false
 
 proc isNewruntime(issue: JsonNode): bool =
-  if "newruntime" in $issue["title"] or
-    "newruntime" in $issue["body"]:
+  if "newruntime" in issue["title"].getStr() or
+    "newruntime" in issue["body"].getStr():
       return true
 
   return false
 
 proc getSnippet(issue: JsonNode): string =
   result = ""
-  let body = $issue["body"]
+  let body = issue["body"].getStr()
   if body != "":
     var
       notnim = false
       start = -1
       endl = -1
 
-    if "```nim" in body:
-      start = body.find("```nim") + 6
-    elif "```" in body:
-      start = body.find("```") + 3
+    if "``` nimrod" in body.toLowerAscii():
+      start = body.toLowerAscii().find("``` nimrod") + 10
+    elif "```nimrod" in body.toLowerAscii():
+      start = body.toLowerAscii().find("```nimrod") + 9
+    elif "``` nim" in body.toLowerAscii():
+      start = body.toLowerAscii().find("``` nim") + 7
+    elif "```nim" in body.toLowerAscii():
+      start = body.toLowerAscii().find("```nim") + 6
+    elif "```\n" in body:
+      start = body.find("```\n") + 4
       notnim = true
 
     if start != -1:
@@ -173,9 +233,9 @@ proc getSnippet(issue: JsonNode): string =
       if notnim:
         result = "# Snippet not defined as ```nim\n\n"
 
-      result &= body[start..<endl].replace("\\r\\n", "\n").replace("\\\"", "\"").strip()
+      result &= body[start..<endl].strip()
 
-proc checkIssue(issue: JsonNode, verbose, write: bool, nimfile: string) {.gcsafe.} =
+proc checkIssue(issue: JsonNode, verbose, write, comment: bool, nim, nimtemp, token: string) {.gcsafe.} =
   if "number" notin issue:
     return
 
@@ -184,10 +244,12 @@ proc checkIssue(issue: JsonNode, verbose, write: bool, nimfile: string) {.gcsafe
     var
       output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
       outverb = ""
+      cdata = ""
 
     if snippet != "":
       let
-        nimout = run($issue["number"], snippet, nimfile, isNewruntime(issue)).strip()
+        nimout = run($issue["number"], snippet, nim, isNewruntime(issue))
+        nimouttemp = run($issue["number"], snippet, nimtemp, isNewruntime(issue))
         nimoutlc = nimout.toLowerAscii()
 
       if "internal error" in nimoutlc or "illegal storage" in nimoutlc:
@@ -197,30 +259,53 @@ proc checkIssue(issue: JsonNode, verbose, write: bool, nimfile: string) {.gcsafe
       else:
         output = "NOCRASH" & output
 
-      outverb = """$#
-
+      outverb = """
 -------- SNIPPET --------
 $#
 -------------------------
 
 -------- OUTPUT --------
 $#
-------------------------""" % [output, snippet, nimout]
+------------------------
+""" % [snippet, nimout]
+
+      if nimouttemp.len() != 0:
+        outverb &= """
+
+-------- NIMTEMP --------
+$#
+-------------------------
+""" % nimouttemp
     else:
       output = "NOSNIPT" & output
 
+    echo output
     if verbose:
-      echo outverb
-    else:
-      echo output
-
+      echo "\n" & outverb
     if write:
       createDir("logs")
-      writeFile(joinPath("logs", output[0..<7] & "-" & $issue["number"] & ".txt"), outverb)
+      writeFile(joinPath("logs", output[0..<7] & "-" & $issue["number"] & ".txt"), output & "\n\n" & outverb)
+
+    if comment:
+      if "NOCRASH" in output:
+        cdata = "No longer crashes with #head.\n\n"
+      elif "CRASHED" in output:
+        cdata = "Still crashes with #head\n\n"
+
+      cdata &= """
+```
+$#
+-------- VERSION --------
+$#
+-------------------------
+```
+""" % [outverb, execCmdTimer(nim & " -v", TIMEOUT)[0]]
+
+      commentIssue($issue["number"], cdata, token)
 
 proc checkAll() =
   var
-    page = 1
+    page = FIRST
     issues: JsonNode
 
   while true:
@@ -234,42 +319,82 @@ proc checkAll() =
       break
 
     for issue in issues:
-      spawn checkIssue(issue, VERBOSE, WRITE, NIMFILE)
+      spawn checkIssue(issue, VERBOSE, WRITE, COMMENT, NIM, NIMTEMP, TOKEN)
 
     page += 1
+    if LAST != -1 and page > LAST:
+      break
+
+proc findNim(dir, nim: string): string =
+  result = joinPath(dir, "bin", @[nim, ExeExt].join(".").strip(chars={'.'}))
+  if not fileExists(result):
+    result = ""
 
 proc parseCli() =
   for param in commandLineParams():
     if dirExists(param):
-      for nimexe in @["nim_temp", "nim"]:
-        var fn = joinPath(param, "bin", @[nimexe, ExeExt].join(".").strip(chars={'.'}))
-        if fileExists(fn):
-          NIMFILE = fn
-          break
-    elif param == "-v":
-      VERBOSE = true
+      NIM = findNim(param, "nim")
+      NIMTEMP = findNim(param, "nim_temp")
+    elif fileExists(param):
+      TOKEN = readFile(param).strip()
+    elif param == "-c":
+      COMMENT = true
+    elif param == "-d":
+      DIRECTION = "desc"
+    elif param[0..<2] == "-f":
+      FIRST = parseInt(param[2..^1])
+      if FIRST < 1:
+        echo "Bad first page"
+        quit(1)
+    elif param[0..<2] == "-n":
+      PER_PAGE = parseInt(param[2..^1])
+      if PER_PAGE < 1 or PER_PAGE > 100:
+        echo "Bad per page"
+        quit(1)
+    elif param[0..<2] == "-l":
+      LAST = parseInt(param[2..^1])
+      if LAST < 1:
+        echo "Bad last page"
+        quit(1)
     elif param == "-o":
       WRITE = true
+    elif param[0..<2] == "-t":
+      FIRST = parseInt(param[2..^1])
+      if FIRST < 1:
+        echo "Bad timeout"
+        quit(1)
+    elif param == "-v":
+      VERBOSE = true
     elif param == "-h":
       echo HELP
       quit(0)
+    elif param == "--debug":
+      DEBUG = true
     else:
       try:
         ISSUE = parseInt(param)
       except:
         discard
 
-  if NIMFILE == "":
-    NIMFILE = findExe("nim_temp")
+  if COMMENT == true and TOKEN.len() == 0:
+    echo "Require token for commenting"
+    quit(1)
 
-  if NIMFILE == "":
-    NIMFILE = findExe("nim")
+  if NIM == "":
+    NIM = findExe("nim")
+
+  if NIMTEMP == "":
+    NIMTEMP = findExe("nim_temp")
+
+  if NIM == "" and NIMTEMP == "":
+    echo "Nim compiler missing"
+    quit(1)
 
 proc main() =
   parseCli()
 
   if ISSUE != 0:
-    checkIssue(getIssue(ISSUE), VERBOSE, WRITE, NIMFILE)
+    checkIssue(getIssue(ISSUE), VERBOSE, WRITE, COMMENT, NIM, NIMTEMP, TOKEN)
   else:
     checkAll()
 
