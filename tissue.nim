@@ -252,7 +252,8 @@ proc checkIssue(issue: JsonNode, verbose, write, comment: bool, nim, nimtemp, to
         nimouttemp = run($issue["number"], snippet, nimtemp, isNewruntime(issue))
         nimoutlc = nimout.toLowerAscii()
 
-      if "internal error" in nimoutlc or "illegal storage" in nimoutlc:
+      if "internal error" in nimoutlc or "illegal storage" in nimoutlc or
+        "Stack overflow" in nimouttemp:
         output = "CRASHED" & output
       elif "timed out" in nimoutlc:
         output = "TIMEOUT" & output
@@ -324,6 +325,8 @@ proc checkAll() =
     page += 1
     if LAST != -1 and page > LAST:
       break
+
+  sync()
 
 proc findNim(dir, nim: string): string =
   result = joinPath(dir, "bin", @[nim, ExeExt].join(".").strip(chars={'.'}))
