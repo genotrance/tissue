@@ -1,10 +1,10 @@
-import httpclient, json, os, ospaths, osproc, pegs, streams, strutils,
+import httpclient, json, os, ospaths, osproc, pegs, rdstdin, streams, strutils,
   threadpool, times, uri
 
 type
   tconfig = object
     category, direction, nimdir, nim, nimtemp, token: string
-    comment, debug, force, pr, verbose, write: bool
+    comment, debug, edit, foreground, force, pr, verbose, write: bool
     first, issue, last, per_page, timeout: int
 
 var CONFIG {.threadvar.}: tconfig
@@ -18,6 +18,8 @@ CONFIG = tconfig(
 
   comment: false,
   debug: false,
+  edit: false,
+  foreground: false,
   force: false,
   pr: false,
   verbose: false,
@@ -54,6 +56,10 @@ Actions:
   -c      post comment on issue with run details
             requires <tokenfile> which contains github auth token
 
+  -e      allow editing snippet before test
+            requires <issueid> since expects user intervention
+            implies running in the foreground
+
   -p      create branch #<issueid>, commit test case (-a), push, create PR
             requires -a<cat> and <issueid>
             requires <nimdir> where test case is pushed
@@ -68,11 +74,15 @@ Output:
 
 Settings:
   -d      sort in descending order           [default: asc]
+  -f      run tests in the foreground
+            timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
-  -f#     page number to start               [default: 1]
-  -n#     number of issues per page          [default: 100/max]
-  -l#     page to stop processing
   -T#     timeout before process is killed   [default: 10]
+
+Pages:
+  -pf#    first page to search from          [default: 1]
+  -pl#    last page to stop processing
+  -pn#    number of issues per page          [default: 100/max]
 """
 
 # CTRL-C handler
@@ -127,19 +137,49 @@ proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int
 
   result[0] = result[0].strip()
 
-proc run(issueid, snippet, nim: string, newruntime = false): string =
+proc isMentioned(issue: JsonNode, search: varargs[string]): bool =
+  let
+    title = issue["title"].getStr().toLowerAscii()
+    body = issue["body"].getStr().toLowerAscii()
+
+  for srch in search:
+    if srch in title or srch in body:
+      return true
+
+  return false
+
+proc isNewruntime(issue: JsonNode): bool =
+  return isMentioned(issue, "newruntime")
+
+proc isCpp(issue: JsonNode): bool =
+  return isMentioned(issue, "cpp", "c++")
+
+proc isSsl(issue: JsonNode): bool =
+  return isMentioned(issue, "ssl")
+
+proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   result = ""
   if nim.len() == 0:
     return
 
   var
-    cmd = nim & " c "
+    cmd = nim
     error = -1
 
-  if newruntime:
+  if check:
+    cmd &= " check "
+  elif isCpp(issue):
+    cmd &= " cpp "
+  else:
+    cmd &= " c "
+
+  if isSsl(issue):
+    cmd &= " -d:ssl "
+
+  if isNewruntime(issue):
     cmd &= "--newruntime "
 
-  let tempDir = getTempDir() / "tissue-" & issueid
+  let tempDir = getTempDir() / "tissue-" & $issue["number"]
   createDir(tempDir)
 
   let codefile = tempDir/"temp"
@@ -149,15 +189,33 @@ proc run(issueid, snippet, nim: string, newruntime = false): string =
   f.write(snippet)
   f.close()
 
-  try:
-    (result, error) = execCmdTimer(cmd, CONFIG.timeout)
-    if error == 0:
-      try:
-        (result, error) = execCmdTimer(codefile, CONFIG.timeout)
-      except OSError:
-        result = "Failed to run"
-  except OSError:
-    result = "Failed to compile"
+  if check == false and CONFIG.nim == nim and CONFIG.edit:
+    echo "Created " & codefile & ".nim"
+
+  while true:
+    if check == false and CONFIG.nim == nim and CONFIG.edit:
+      if readLineFromStdin("\nPress any key to run, q to quit: ").strip().
+        toLowerAscii().strip() == "q":
+        break
+
+    try:
+      if CONFIG.foreground:
+        error = execCmd(cmd)
+      else:
+        (result, error) = execCmdTimer(cmd, CONFIG.timeout)
+      if error == 0:
+        try:
+          if CONFIG.foreground:
+            error = execCmd(codefile)
+          else:
+            (result, error) = execCmdTimer(codefile, CONFIG.timeout)
+        except OSError:
+          result = "Failed to run"
+    except OSError:
+      result = "Failed to compile"
+
+    if not CONFIG.edit or CONFIG.nim != nim:
+      break
 
   # Wait for rmdir since process was killed
   if error == -1:
@@ -238,36 +296,46 @@ proc isCrash(issue: JsonNode): bool =
 
   return false
 
-proc isNewruntime(issue: JsonNode): bool =
-  if "newruntime" in issue["title"].getStr() or
-    "newruntime" in issue["body"].getStr():
-      return true
-
-  return false
-
 proc getSnippet(issue: JsonNode): string =
   result = ""
-  let body = issue["body"].getStr()
+  let
+    body = issue["body"].getStr()
+    bodylc = body.toLowerAscii()
+
   if body != "":
     var
       notnim = false
       start = -1
       endl = -1
+      s = 0
+      run = ""
+      runout = ""
 
-    if "``` nimrod" in body.toLowerAscii():
-      start = body.toLowerAscii().find("``` nimrod") + 10
-    elif "```nimrod" in body.toLowerAscii():
-      start = body.toLowerAscii().find("```nimrod") + 9
-    elif "``` nim" in body.toLowerAscii():
-      start = body.toLowerAscii().find("``` nim") + 7
-    elif "```nim" in body.toLowerAscii():
-      start = body.toLowerAscii().find("```nim") + 6
-    elif "```\n" in body:
-      start = body.find("```\n") + 4
-      notnim = true
+    for mark in @["``` nimrod\n", "```nimrod\n", "``` nim\n", "```nim\n"]:
+      if mark in bodylc:
+        start = bodylc.find(mark) + mark.len()
+        endl = body.find("```", start)
+        break
 
-    if start != -1:
-      endl = body.find("```", start+1)
+    if start == -1:
+      while "```\n" in body[s..^1]:
+        start = body.find("```\n", s) + 4
+        endl = body.find("```", start)
+        if endl == -1:
+          break
+        s = endl + 1
+
+        run = body[start..<endl].strip()
+        runout = run(issue, run, CONFIG.nim, check=true)
+        if runout.find("undeclared") == -1:
+          notnim = true
+          break
+        else:
+          decho runout
+
+      if not notnim:
+        start = -1
+        endl = -1
 
     if start != -1 and endl != -1:
       if notnim:
@@ -376,8 +444,8 @@ proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
       outverb = ""
 
     if snippet != "":
-      nimout = run($issue["number"], snippet, CONFIG.nim, isNewruntime(issue))
-      nimouttemp = run($issue["number"], snippet, CONFIG.nimtemp, isNewruntime(issue))
+      nimout = run(issue, snippet, CONFIG.nim)
+      nimouttemp = run(issue, snippet, CONFIG.nimtemp)
       nimoutlc = nimout.toLowerAscii()
 
       crashtype = getCrashType(nimoutlc, nimouttemp)
@@ -444,29 +512,19 @@ proc parseCli() =
       CONFIG.comment = true
     elif param == "-d":
       CONFIG.direction = "desc"
+    elif param == "-e":
+      CONFIG.edit = true
+      CONFIG.foreground = true
+    elif param == "-f":
+      CONFIG.foreground = true
     elif param == "-F":
       CONFIG.force = true
-    elif param[0..<2] == "-f":
-      CONFIG.first = parseInt(param[2..^1])
-      if CONFIG.first < 1:
-        echo "Bad first page"
-        quit(1)
-    elif param[0..<2] == "-n":
-      CONFIG.per_page = parseInt(param[2..^1])
-      if CONFIG.per_page < 1 or CONFIG.per_page > 100:
-        echo "Bad per page"
-        quit(1)
-    elif param[0..<2] == "-l":
-      CONFIG.last = parseInt(param[2..^1])
-      if CONFIG.last < 1:
-        echo "Bad last page"
-        quit(1)
     elif param == "-o":
       CONFIG.write = true
     elif param == "-p":
       CONFIG.pr = true
     elif param[0..<2] == "-T":
-      CONFIG.first = parseInt(param[2..^1])
+      CONFIG.timeout = parseInt(param[2..^1])
       if CONFIG.first < 1:
         echo "Bad timeout"
         quit(1)
@@ -475,6 +533,21 @@ proc parseCli() =
     elif param == "-h":
       echo HELP
       quit(0)
+    elif param[0..<3] == "-pf":
+      CONFIG.first = parseInt(param[3..^1])
+      if CONFIG.first < 1:
+        echo "Bad first page"
+        quit(1)
+    elif param[0..<3] == "-pl":
+      CONFIG.last = parseInt(param[3..^1])
+      if CONFIG.last < 1:
+        echo "Bad last page"
+        quit(1)
+    elif param[0..<3] == "-pn":
+      CONFIG.per_page = parseInt(param[3..^1])
+      if CONFIG.per_page < 1 or CONFIG.per_page > 100:
+        echo "Bad per page"
+        quit(1)
     elif param == "--debug":
       CONFIG.debug = true
     else:
