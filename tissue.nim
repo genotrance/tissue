@@ -1,47 +1,79 @@
-import httpclient, json, os, ospaths, osproc, streams, strutils, threadpool,
-  times, uri
+import httpclient, json, os, ospaths, osproc, pegs, streams, strutils,
+  threadpool, times, uri
 
-var
-  COMMENT = false
-  DEBUG = false
-  DIRECTION = "asc"
-  FIRST = 1
-  ISSUE = 0
-  LAST = -1
-  NIM = ""
-  NIMTEMP = ""
-  PER_PAGE = 100
-  TIMEOUT = 10
-  TOKEN = ""
-  VERBOSE = false
-  WRITE = false
+type
+  tconfig = object
+    category, direction, nimdir, nim, nimtemp, token: string
+    comment, debug, force, pr, verbose, write: bool
+    first, issue, last, per_page, timeout: int
+
+var CONFIG {.threadvar.}: tconfig
+CONFIG = tconfig(
+  category: "",
+  direction: "asc",
+  nimdir: "",
+  nim: "",
+  nimtemp: "",
+  token: "",
+
+  comment: false,
+  debug: false,
+  force: false,
+  pr: false,
+  verbose: false,
+  write: false,
+
+  first: 1,
+  issue: 0,
+  last: -1,
+  per_page: 100,
+  timeout: 10
+)
 
 let HELP = """
 Test failing snippets from Nim's issues
 
 tissue [nimdir] [issueid] [tokenfile] [-dhov] [-fln#]
 
-  If nimdir specified on command line:
-    Look for nimdir\bin\nim
-    Look for nimdir\bin\nim_temp
+  If <nimdir> specified on command line:
+    Look for <nimdir>\bin\nim
+    Look for <nimdir>\bin\nim_temp
 
   If either not found:
     Look for nim in path
     Look for nim_temp in path
 
-  If no issue ID, run through all issues
+  If no <issueid>:
+    Run through all issues
 
-  If -c specified, require tokenfile which contains github auth token
+Actions:
+  -a<cat> add and verify test case <nimdir>/tests/<cat>/t<issueid>.nim
+            requires <nimdir> where test case can be created and tested
+            requires <issueid> since test category is issue specific
 
   -c      post comment on issue with run details
-  -d      sort in descending order [default: asc]
-  -f#     page number to start [default: 1]
-  -n#     number of issues per page [default: 100/max]
-  -l#     page to stop processing
+            requires <tokenfile> which contains github auth token
+
+  -p      create branch #<issueid>, commit test case (-a), push, create PR
+            requires -a<cat> and <issueid>
+            requires <nimdir> where test case is pushed
+            requires <tokenfile> which contains github auth token
+            NOTE: <nimdir> should be fork of nim-lang/Nim that can be written
+                  to by github auth token specified
+
+Output:
+  -h      this help screen
   -o      write verbose output to logs\issueid.txt
-  -t#     timeout in seconds before process is killed [default: 10]
   -v      write verbose output to stdout
-  -h"""
+
+Settings:
+  -d      sort in descending order           [default: asc]
+  -F      force write test case if exists    [default: false]
+  -f#     page number to start               [default: 1]
+  -n#     number of issues per page          [default: 100/max]
+  -l#     page to stop processing
+  -T#     timeout before process is killed   [default: 10]
+"""
 
 # CTRL-C handler
 proc chandler() {.noconv.} =
@@ -50,8 +82,16 @@ proc chandler() {.noconv.} =
 setControlCHook(chandler)
 
 template decho(params: varargs[untyped]) =
-  if DEBUG:
+  if CONFIG.debug:
     echo params
+
+template withDir*(dir: string; body: untyped): untyped =
+  var curDir = getCurrentDir()
+  try:
+    setCurrentDir(dir)
+    body
+  finally:
+    setCurrentDir(curDir)
 
 proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int] =
   result = ("", -1)
@@ -102,7 +142,7 @@ proc run(issueid, snippet, nim: string, newruntime = false): string =
   let tempDir = getTempDir() / "tissue-" & issueid
   createDir(tempDir)
 
-  let codefile = joinPath(tempDir, "temp")
+  let codefile = tempDir/"temp"
   cmd &= codefile
 
   let f = open(codefile & ".nim", fmWrite)
@@ -110,10 +150,10 @@ proc run(issueid, snippet, nim: string, newruntime = false): string =
   f.close()
 
   try:
-    (result, error) = execCmdTimer(cmd, TIMEOUT)
+    (result, error) = execCmdTimer(cmd, CONFIG.timeout)
     if error == 0:
       try:
-        (result, error) = execCmdTimer(codefile, TIMEOUT)
+        (result, error) = execCmdTimer(codefile, CONFIG.timeout)
       except OSError:
         result = "Failed to run"
   except OSError:
@@ -151,10 +191,10 @@ proc getProxy(): Proxy =
     return nil
 
 proc getIssues(page = 1): JsonNode =
-  decho "Getting page $# @ $# per page" % [$page, $PER_PAGE]
+  decho "Getting page $# @ $# per page" % [$page, $CONFIG.per_page]
   return newHttpClient(proxy = getProxy()).
     getContent("https://api.github.com/repos/nim-lang/nim/issues?direction=$#&per_page=$#&page=$#" %
-      [DIRECTION, $PER_PAGE, $page]).parseJson()
+      [CONFIG.direction, $CONFIG.per_page, $page]).parseJson()
 
 proc getIssue(issue: int): JsonNode =
   decho "Getting issue $#" % $issue
@@ -235,32 +275,16 @@ proc getSnippet(issue: JsonNode): string =
 
       result &= body[start..<endl].strip()
 
-proc checkIssue(issue: JsonNode, verbose, write, comment: bool, nim, nimtemp, token: string) {.gcsafe.} =
-  if "number" notin issue:
-    return
+proc getCrashType(nimoutlc, nimouttemp: string): string =
+  result = "NOCRASH"
+  if "internal error" in nimoutlc or "illegal storage" in nimoutlc or
+    "Stack overflow" in nimouttemp:
+    result = "CRASHED"
+  elif "timed out" in nimoutlc:
+    result = "TIMEOUT"
 
-  if isCrash(issue):
-    let snippet = getSnippet(issue)
-    var
-      output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
-      outverb = ""
-      cdata = ""
-
-    if snippet != "":
-      let
-        nimout = run($issue["number"], snippet, nim, isNewruntime(issue))
-        nimouttemp = run($issue["number"], snippet, nimtemp, isNewruntime(issue))
-        nimoutlc = nimout.toLowerAscii()
-
-      if "internal error" in nimoutlc or "illegal storage" in nimoutlc or
-        "Stack overflow" in nimouttemp:
-        output = "CRASHED" & output
-      elif "timed out" in nimoutlc:
-        output = "TIMEOUT" & output
-      else:
-        output = "NOCRASH" & output
-
-      outverb = """
+proc getVerbOut(snippet, nimout, nimouttemp: string): string =
+  result = """
 -------- SNIPPET --------
 $#
 -------------------------
@@ -270,43 +294,116 @@ $#
 ------------------------
 """ % [snippet, nimout]
 
-      if nimouttemp.len() != 0:
-        outverb &= """
+  if nimouttemp.len() != 0:
+    result &= """
 
 -------- NIMTEMP --------
 $#
 -------------------------
 """ % nimouttemp
-    else:
-      output = "NOSNIPT" & output
 
-    echo output
-    if verbose:
-      echo "\n" & outverb
-    if write:
-      createDir("logs")
-      writeFile(joinPath("logs", output[0..<7] & "-" & $issue["number"] & ".txt"), output & "\n\n" & outverb)
+proc getCommentOut(crashtype, outverb: string): string =
+  case crashtype
+  of "NOCRASH":
+    result = "No longer crashes with #head.\n\n"
+  of "CRASHED":
+    result = "Still crashes with #head\n\n"
+  of "TIMEOUT":
+    result = "Times out with #head\n\n"
 
-    if comment:
-      if "NOCRASH" in output:
-        cdata = "No longer crashes with #head.\n\n"
-      elif "CRASHED" in output:
-        cdata = "Still crashes with #head\n\n"
-
-      cdata &= """
+  result &= """
 ```
 $#
 -------- VERSION --------
 $#
 -------------------------
 ```
-""" % [outverb, execCmdTimer(nim & " -v", TIMEOUT)[0]]
+""" % [outverb, execCmdTimer(CONFIG.nim & " -v", CONFIG.timeout)[0]]
 
-      commentIssue($issue["number"], cdata, token)
+proc buildTestament(): bool =
+  var
+    cmd = CONFIG.nim & " c --taintMode:on -d:nimCoroutines " &
+      CONFIG.nimdir/"tests"/"testament"/"tester"
+    (output, error) = execCmdEx(cmd)
+
+  return error == 0
+
+proc testCategory(): bool =
+  var
+    cmd = CONFIG.nimdir/"tests"/"testament"/"tester" &
+      " \"--nim:" & "compiler"/"nim" & " \" cat " & CONFIG.category
+    error = 0
+
+  withDir CONFIG.nimdir:
+    error = execCmd(cmd)
+
+  echo cmd
+  return error == 0
+
+proc addTestcase(issueid, snippet, nimout: string): bool =
+  let
+    fn = CONFIG.nimdir/"tests"/CONFIG.category/"t$#.nim" % issueid
+
+  if fileExists(fn):
+    if not CONFIG.force:
+      echo "Test case already exists, not overwriting: " & fn
+      return false
+
+  var errorStr = ""
+  for line in nimout.splitLines():
+    if line =~ peg"""'temp.nim'\({\d+}', '+\d+\)' Error: '{.+}""":
+      errorStr = "discard \"\"\"\nerrormsg: \"$#\"\nline: $#\n\"\"\"\n\n" %
+        [matches[1], $(parseInt(matches[0])+5)]
+      break
+
+  writeFile(fn, errorStr & snippet)
+
+  return true
+
+proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
+  CONFIG = config
+  if "number" notin issue:
+    return
+
+  if isCrash(issue):
+    let snippet = getSnippet(issue)
+    var
+      crashtype = "NOSNIPT"
+      nimout = ""
+      nimoutlc = ""
+      nimouttemp = ""
+      output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
+      outverb = ""
+
+    if snippet != "":
+      nimout = run($issue["number"], snippet, CONFIG.nim, isNewruntime(issue))
+      nimouttemp = run($issue["number"], snippet, CONFIG.nimtemp, isNewruntime(issue))
+      nimoutlc = nimout.toLowerAscii()
+
+      crashtype = getCrashType(nimoutlc, nimouttemp)
+      outverb = getVerbOut(snippet, nimout, nimouttemp)
+
+    output = crashtype & output
+
+    echo output
+    if CONFIG.verbose:
+      echo "\n" & outverb
+
+    if CONFIG.write:
+      createDir("logs")
+      writeFile("logs"/crashtype & "-" & $issue["number"] & ".txt", output & "\n\n" & outverb)
+
+    if CONFIG.comment:
+      echo getCommentOut(crashtype, outverb)
+      #commentIssue($issue["number"], getCommentOut(crashtype, outverb), CONFIG.token)
+
+    if CONFIG.category.len() != 0:
+      if not addTestcase($issue["number"], snippet, nimout) or not testCategory():
+        echo "Test case failed"
 
 proc checkAll() =
   var
-    page = FIRST
+    page = CONFIG.first
     issues: JsonNode
 
   while true:
@@ -320,84 +417,110 @@ proc checkAll() =
       break
 
     for issue in issues:
-      spawn checkIssue(issue, VERBOSE, WRITE, COMMENT, NIM, NIMTEMP, TOKEN)
+      spawn checkIssue(issue, CONFIG)
 
     page += 1
-    if LAST != -1 and page > LAST:
+    if CONFIG.last != -1 and page > CONFIG.last:
       break
 
   sync()
 
 proc findNim(dir, nim: string): string =
-  result = joinPath(dir, "bin", @[nim, ExeExt].join(".").strip(chars={'.'}))
+  result = dir/"bin"/(@[nim, ExeExt].join(".").strip(chars={'.'}))
   if not fileExists(result):
     result = ""
 
 proc parseCli() =
   for param in commandLineParams():
     if dirExists(param):
-      NIM = findNim(param, "nim")
-      NIMTEMP = findNim(param, "nim_temp")
+      CONFIG.nimdir = param
+      CONFIG.nim = findNim(param, "nim")
+      CONFIG.nimtemp = findNim(param, "nim_temp")
     elif fileExists(param):
-      TOKEN = readFile(param).strip()
+      CONFIG.token = readFile(param).strip()
+    elif param[0..<2] == "-a":
+      CONFIG.category = param[2..^1]
     elif param == "-c":
-      COMMENT = true
+      CONFIG.comment = true
     elif param == "-d":
-      DIRECTION = "desc"
+      CONFIG.direction = "desc"
+    elif param == "-F":
+      CONFIG.force = true
     elif param[0..<2] == "-f":
-      FIRST = parseInt(param[2..^1])
-      if FIRST < 1:
+      CONFIG.first = parseInt(param[2..^1])
+      if CONFIG.first < 1:
         echo "Bad first page"
         quit(1)
     elif param[0..<2] == "-n":
-      PER_PAGE = parseInt(param[2..^1])
-      if PER_PAGE < 1 or PER_PAGE > 100:
+      CONFIG.per_page = parseInt(param[2..^1])
+      if CONFIG.per_page < 1 or CONFIG.per_page > 100:
         echo "Bad per page"
         quit(1)
     elif param[0..<2] == "-l":
-      LAST = parseInt(param[2..^1])
-      if LAST < 1:
+      CONFIG.last = parseInt(param[2..^1])
+      if CONFIG.last < 1:
         echo "Bad last page"
         quit(1)
     elif param == "-o":
-      WRITE = true
-    elif param[0..<2] == "-t":
-      FIRST = parseInt(param[2..^1])
-      if FIRST < 1:
+      CONFIG.write = true
+    elif param == "-p":
+      CONFIG.pr = true
+    elif param[0..<2] == "-T":
+      CONFIG.first = parseInt(param[2..^1])
+      if CONFIG.first < 1:
         echo "Bad timeout"
         quit(1)
     elif param == "-v":
-      VERBOSE = true
+      CONFIG.verbose = true
     elif param == "-h":
       echo HELP
       quit(0)
     elif param == "--debug":
-      DEBUG = true
+      CONFIG.debug = true
     else:
       try:
-        ISSUE = parseInt(param)
+        CONFIG.issue = parseInt(param)
       except:
         discard
 
-  if COMMENT == true and TOKEN.len() == 0:
+  if CONFIG.comment == true and CONFIG.token.len() == 0:
     echo "Require token for commenting"
     quit(1)
 
-  if NIM == "":
-    NIM = findExe("nim")
+  if CONFIG.category.len() == 0:
+    if CONFIG.pr:
+      echo "Require -a<dir> for -p"
+      quit(1)
+  else:
+    if CONFIG.nimdir.len() == 0:
+      echo "Require <nimdir> for adding test case"
+      quit(1)
+    elif CONFIG.issue == 0:
+      echo "Require <issueid> for adding test case"
+      quit(1)
+    else:
+      if not dirExists(CONFIG.nimdir/"tests"/CONFIG.category):
+        echo "Not a nim test category: " & CONFIG.category
+        quit(1)
 
-  if NIMTEMP == "":
-    NIMTEMP = findExe("nim_temp")
+      if not buildTestament():
+        echo "Failed in building testament"
 
-  if NIM == "" and NIMTEMP == "":
+  if CONFIG.nim == "":
+    CONFIG.nim = findExe("nim")
+
+  if CONFIG.nimtemp == "":
+    CONFIG.nimtemp = findExe("nim_temp")
+
+  if CONFIG.nim == "" and CONFIG.nimtemp == "":
     echo "Nim compiler missing"
     quit(1)
 
 proc main() =
   parseCli()
 
-  if ISSUE != 0:
-    checkIssue(getIssue(ISSUE), VERBOSE, WRITE, COMMENT, NIM, NIMTEMP, TOKEN)
+  if CONFIG.issue != 0:
+    checkIssue(getIssue(CONFIG.issue), CONFIG)
   else:
     checkAll()
 
