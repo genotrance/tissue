@@ -20,6 +20,10 @@ Actions:
   -c      post comment on issue with run details
             requires <tokenfile> which contains github auth token
 
+  -e      allow editing snippet before test
+            requires <issueid> since expects user intervention
+            implies running in the foreground
+
   -p      create branch #<issueid>, commit test case (-a), push, create PR
             requires -a<cat> and <issueid>
             requires <nimdir> where test case is pushed
@@ -34,9 +38,13 @@ Output:
 
 Settings:
   -d      sort in descending order           [default: asc]
+  -f      run tests in the foreground
+            timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
-  -f#     page number to start               [default: 1]
-  -n#     number of issues per page          [default: 100/max]
-  -l#     page to stop processing
   -T#     timeout before process is killed   [default: 10]
+
+Pages:
+  -pf#    first page to search from          [default: 1]
+  -pl#    last page to stop processing
+  -pn#    number of issues per page          [default: 100/max]
 ```
