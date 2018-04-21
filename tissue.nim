@@ -462,8 +462,7 @@ proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
       writeFile("logs"/crashtype & "-" & $issue["number"] & ".txt", output & "\n\n" & outverb)
 
     if CONFIG.comment:
-      echo getCommentOut(crashtype, outverb)
-      #commentIssue($issue["number"], getCommentOut(crashtype, outverb), CONFIG.token)
+      commentIssue($issue["number"], getCommentOut(crashtype, outverb), CONFIG.token)
 
     if CONFIG.category.len() != 0:
       if not addTestcase($issue["number"], snippet, nimout) or not testCategory():
