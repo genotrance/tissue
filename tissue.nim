@@ -1,5 +1,5 @@
-import httpclient, json, os, ospaths, osproc, pegs, rdstdin, streams, strutils,
-  threadpool, times, uri
+import httpclient, json, os, ospaths, osproc, parsecfg, pegs, rdstdin, streams,
+  strutils, tables, threadpool, times, uri
 
 type
   ConfigObj = object
@@ -31,6 +31,8 @@ gConfig = ConfigObj(
   per_page: 100,
   timeout: 10
 )
+
+var gIgnore: seq[string] = @[]
 
 let HELP = """
 Test failing snippets from Nim's issues
@@ -484,6 +486,9 @@ proc checkAll() =
       break
 
     for issue in issues:
+      if $issue["number"] in gIgnore:
+        continue
+
       spawn checkIssue(issue, gConfig)
 
     page += 1
@@ -496,6 +501,33 @@ proc findNim(dir, nim: string): string =
   result = dir/"bin"/(@[nim, ExeExt].join(".").strip(chars={'.'}))
   if not fileExists(result):
     result = ""
+
+proc loadCfg() =
+  for cfile in @[getCurrentDir()/"ti.cfg", getAppDir()/"ti.cfg"]:
+    if fileExists(cfile):
+      var cfg = loadConfig(cfile)
+      if cfg.hasKey("config"):
+        for key in cfg["config"].keys:
+          if key == "nimdir":
+            if dirExists(cfg["config"][key]):
+              gConfig.nimdir = cfg["config"][key]
+              gConfig.nim = findNim(cfg["config"][key], "nim")
+              gConfig.nimtemp = findNim(cfg["config"][key], "nim_temp")
+            else:
+              echo "Bad nimdir in cfg: " & cfg["config"][key]
+          elif key == "tokenfile":
+            if fileExists(cfg["config"][key]):
+              gConfig.token = readFile(cfg["config"][key]).strip()
+            else:
+              echo "Bad tokenfile in cfg: " & cfg["config"][key]
+          else:
+            echo "Unknown key in cfg: " & key
+
+      if cfg.hasKey("ignore"):
+        for key in cfg["ignore"].keys:
+          gIgnore.add(key)
+
+      break
 
 proc parseCli() =
   for param in commandLineParams():
@@ -589,6 +621,7 @@ proc parseCli() =
     quit(1)
 
 proc main() =
+  loadCfg()
   parseCli()
 
   if gConfig.issue != 0:
