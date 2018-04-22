@@ -2,13 +2,13 @@ import httpclient, json, os, ospaths, osproc, pegs, rdstdin, streams, strutils,
   threadpool, times, uri
 
 type
-  tconfig = object
+  ConfigObj = object
     category, direction, nimdir, nim, nimtemp, token: string
     comment, debug, edit, foreground, force, pr, verbose, write: bool
     first, issue, last, per_page, timeout: int
 
-var CONFIG {.threadvar.}: tconfig
-CONFIG = tconfig(
+var gConfig {.threadvar.}: ConfigObj
+gConfig = ConfigObj(
   category: "",
   direction: "asc",
   nimdir: "",
@@ -35,7 +35,7 @@ CONFIG = tconfig(
 let HELP = """
 Test failing snippets from Nim's issues
 
-tissue [nimdir] [issueid] [tokenfile] [-dhov] [-fln#]
+tissue [nimdir] [issueid] [tokenfile] [flags]
 
   If <nimdir> specified on command line:
     Look for <nimdir>\bin\nim
@@ -92,7 +92,7 @@ proc chandler() {.noconv.} =
 setControlCHook(chandler)
 
 template decho(params: varargs[untyped]) =
-  if CONFIG.debug:
+  if gConfig.debug:
     echo params
 
 template withDir*(dir: string; body: untyped): untyped =
@@ -189,32 +189,32 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   f.write(snippet)
   f.close()
 
-  if check == false and CONFIG.nim == nim and CONFIG.edit:
+  if check == false and gConfig.nim == nim and gConfig.edit:
     echo "Created " & codefile & ".nim"
 
   while true:
-    if check == false and CONFIG.nim == nim and CONFIG.edit:
+    if check == false and gConfig.nim == nim and gConfig.edit:
       if readLineFromStdin("\nPress any key to run, q to quit: ").strip().
         toLowerAscii().strip() == "q":
         break
 
     try:
-      if CONFIG.foreground:
+      if gConfig.foreground:
         error = execCmd(cmd)
       else:
-        (result, error) = execCmdTimer(cmd, CONFIG.timeout)
+        (result, error) = execCmdTimer(cmd, gConfig.timeout)
       if error == 0:
         try:
-          if CONFIG.foreground:
+          if gConfig.foreground:
             error = execCmd(codefile)
           else:
-            (result, error) = execCmdTimer(codefile, CONFIG.timeout)
+            (result, error) = execCmdTimer(codefile, gConfig.timeout)
         except OSError:
           result = "Failed to run"
     except OSError:
       result = "Failed to compile"
 
-    if not CONFIG.edit or CONFIG.nim != nim:
+    if not gConfig.edit or gConfig.nim != nim:
       break
 
   # Wait for rmdir since process was killed
@@ -249,10 +249,10 @@ proc getProxy(): Proxy =
     return nil
 
 proc getIssues(page = 1): JsonNode =
-  decho "Getting page $# @ $# per page" % [$page, $CONFIG.per_page]
+  decho "Getting page $# @ $# per page" % [$page, $gConfig.per_page]
   return newHttpClient(proxy = getProxy()).
     getContent("https://api.github.com/repos/nim-lang/nim/issues?direction=$#&per_page=$#&page=$#" %
-      [CONFIG.direction, $CONFIG.per_page, $page]).parseJson()
+      [gConfig.direction, $gConfig.per_page, $page]).parseJson()
 
 proc getIssue(issue: int): JsonNode =
   decho "Getting issue $#" % $issue
@@ -326,7 +326,7 @@ proc getSnippet(issue: JsonNode): string =
         s = endl + 1
 
         run = body[start..<endl].strip()
-        runout = run(issue, run, CONFIG.nim, check=true)
+        runout = run(issue, run, gConfig.nim, check=true)
         if runout.find("undeclared") == -1:
           notnim = true
           break
@@ -386,23 +386,23 @@ $#
 $#
 -------------------------
 ```
-""" % [outverb, execCmdTimer(CONFIG.nim & " -v", CONFIG.timeout)[0]]
+""" % [outverb, execCmdTimer(gConfig.nim & " -v", gConfig.timeout)[0]]
 
 proc buildTestament(): bool =
   var
-    cmd = CONFIG.nim & " c --taintMode:on -d:nimCoroutines " &
-      CONFIG.nimdir/"tests"/"testament"/"tester"
+    cmd = gConfig.nim & " c --taintMode:on -d:nimCoroutines " &
+      gConfig.nimdir/"tests"/"testament"/"tester"
     (output, error) = execCmdEx(cmd)
 
   return error == 0
 
 proc testCategory(): bool =
   var
-    cmd = CONFIG.nimdir/"tests"/"testament"/"tester" &
-      " \"--nim:" & "compiler"/"nim" & " \" cat " & CONFIG.category
+    cmd = gConfig.nimdir/"tests"/"testament"/"tester" &
+      " \"--nim:" & "compiler"/"nim" & " \" cat " & gConfig.category
     error = 0
 
-  withDir CONFIG.nimdir:
+  withDir gConfig.nimdir:
     error = execCmd(cmd)
 
   echo cmd
@@ -410,10 +410,10 @@ proc testCategory(): bool =
 
 proc addTestcase(issueid, snippet, nimout: string): bool =
   let
-    fn = CONFIG.nimdir/"tests"/CONFIG.category/"t$#.nim" % issueid
+    fn = gConfig.nimdir/"tests"/gConfig.category/"t$#.nim" % issueid
 
   if fileExists(fn):
-    if not CONFIG.force:
+    if not gConfig.force:
       echo "Test case already exists, not overwriting: " & fn
       return false
 
@@ -428,8 +428,8 @@ proc addTestcase(issueid, snippet, nimout: string): bool =
 
   return true
 
-proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
-  CONFIG = config
+proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
+  gConfig = config
   if "number" notin issue:
     return
 
@@ -444,8 +444,8 @@ proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
       outverb = ""
 
     if snippet != "":
-      nimout = run(issue, snippet, CONFIG.nim)
-      nimouttemp = run(issue, snippet, CONFIG.nimtemp)
+      nimout = run(issue, snippet, gConfig.nim)
+      nimouttemp = run(issue, snippet, gConfig.nimtemp)
       nimoutlc = nimout.toLowerAscii()
 
       crashtype = getCrashType(nimoutlc, nimouttemp)
@@ -454,23 +454,23 @@ proc checkIssue(issue: JsonNode, config: tconfig) {.gcsafe.} =
     output = crashtype & output
 
     echo output
-    if CONFIG.verbose:
+    if gConfig.verbose:
       echo "\n" & outverb
 
-    if CONFIG.write:
+    if gConfig.write:
       createDir("logs")
       writeFile("logs"/crashtype & "-" & $issue["number"] & ".txt", output & "\n\n" & outverb)
 
-    if CONFIG.comment:
-      commentIssue($issue["number"], getCommentOut(crashtype, outverb), CONFIG.token)
+    if gConfig.comment:
+      commentIssue($issue["number"], getCommentOut(crashtype, outverb), gConfig.token)
 
-    if CONFIG.category.len() != 0:
+    if gConfig.category.len() != 0:
       if not addTestcase($issue["number"], snippet, nimout) or not testCategory():
         echo "Test case failed"
 
 proc checkAll() =
   var
-    page = CONFIG.first
+    page = gConfig.first
     issues: JsonNode
 
   while true:
@@ -484,10 +484,10 @@ proc checkAll() =
       break
 
     for issue in issues:
-      spawn checkIssue(issue, CONFIG)
+      spawn checkIssue(issue, gConfig)
 
     page += 1
-    if CONFIG.last != -1 and page > CONFIG.last:
+    if gConfig.last != -1 and page > gConfig.last:
       break
 
   sync()
@@ -500,99 +500,99 @@ proc findNim(dir, nim: string): string =
 proc parseCli() =
   for param in commandLineParams():
     if dirExists(param):
-      CONFIG.nimdir = param
-      CONFIG.nim = findNim(param, "nim")
-      CONFIG.nimtemp = findNim(param, "nim_temp")
+      gConfig.nimdir = param
+      gConfig.nim = findNim(param, "nim")
+      gConfig.nimtemp = findNim(param, "nim_temp")
     elif fileExists(param):
-      CONFIG.token = readFile(param).strip()
+      gConfig.token = readFile(param).strip()
     elif param[0..<2] == "-a":
-      CONFIG.category = param[2..^1]
+      gConfig.category = param[2..^1]
     elif param == "-c":
-      CONFIG.comment = true
+      gConfig.comment = true
     elif param == "-d":
-      CONFIG.direction = "desc"
+      gConfig.direction = "desc"
     elif param == "-e":
-      CONFIG.edit = true
-      CONFIG.foreground = true
+      gConfig.edit = true
+      gConfig.foreground = true
     elif param == "-f":
-      CONFIG.foreground = true
+      gConfig.foreground = true
     elif param == "-F":
-      CONFIG.force = true
+      gConfig.force = true
     elif param == "-o":
-      CONFIG.write = true
+      gConfig.write = true
     elif param == "-p":
-      CONFIG.pr = true
+      gConfig.pr = true
     elif param[0..<2] == "-T":
-      CONFIG.timeout = parseInt(param[2..^1])
-      if CONFIG.first < 1:
+      gConfig.timeout = parseInt(param[2..^1])
+      if gConfig.first < 1:
         echo "Bad timeout"
         quit(1)
     elif param == "-v":
-      CONFIG.verbose = true
+      gConfig.verbose = true
     elif param == "-h":
       echo HELP
       quit(0)
     elif param[0..<3] == "-pf":
-      CONFIG.first = parseInt(param[3..^1])
-      if CONFIG.first < 1:
+      gConfig.first = parseInt(param[3..^1])
+      if gConfig.first < 1:
         echo "Bad first page"
         quit(1)
     elif param[0..<3] == "-pl":
-      CONFIG.last = parseInt(param[3..^1])
-      if CONFIG.last < 1:
+      gConfig.last = parseInt(param[3..^1])
+      if gConfig.last < 1:
         echo "Bad last page"
         quit(1)
     elif param[0..<3] == "-pn":
-      CONFIG.per_page = parseInt(param[3..^1])
-      if CONFIG.per_page < 1 or CONFIG.per_page > 100:
+      gConfig.per_page = parseInt(param[3..^1])
+      if gConfig.per_page < 1 or gConfig.per_page > 100:
         echo "Bad per page"
         quit(1)
     elif param == "--debug":
-      CONFIG.debug = true
+      gConfig.debug = true
     else:
       try:
-        CONFIG.issue = parseInt(param)
+        gConfig.issue = parseInt(param)
       except:
         discard
 
-  if CONFIG.comment == true and CONFIG.token.len() == 0:
+  if gConfig.comment == true and gConfig.token.len() == 0:
     echo "Require token for commenting"
     quit(1)
 
-  if CONFIG.category.len() == 0:
-    if CONFIG.pr:
+  if gConfig.category.len() == 0:
+    if gConfig.pr:
       echo "Require -a<dir> for -p"
       quit(1)
   else:
-    if CONFIG.nimdir.len() == 0:
+    if gConfig.nimdir.len() == 0:
       echo "Require <nimdir> for adding test case"
       quit(1)
-    elif CONFIG.issue == 0:
+    elif gConfig.issue == 0:
       echo "Require <issueid> for adding test case"
       quit(1)
     else:
-      if not dirExists(CONFIG.nimdir/"tests"/CONFIG.category):
-        echo "Not a nim test category: " & CONFIG.category
+      if not dirExists(gConfig.nimdir/"tests"/gConfig.category):
+        echo "Not a nim test category: " & gConfig.category
         quit(1)
 
       if not buildTestament():
         echo "Failed in building testament"
 
-  if CONFIG.nim == "":
-    CONFIG.nim = findExe("nim")
+  if gConfig.nim == "":
+    gConfig.nim = findExe("nim")
 
-  if CONFIG.nimtemp == "":
-    CONFIG.nimtemp = findExe("nim_temp")
+  if gConfig.nimtemp == "":
+    gConfig.nimtemp = findExe("nim_temp")
 
-  if CONFIG.nim == "" and CONFIG.nimtemp == "":
+  if gConfig.nim == "" and gConfig.nimtemp == "":
     echo "Nim compiler missing"
     quit(1)
 
 proc main() =
   parseCli()
 
-  if CONFIG.issue != 0:
-    checkIssue(getIssue(CONFIG.issue), CONFIG)
+  if gConfig.issue != 0:
+    checkIssue(getIssue(gConfig.issue), gConfig)
   else:
     checkAll()
 
