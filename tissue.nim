@@ -191,11 +191,11 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   f.write(snippet)
   f.close()
 
-  if check == false and gConfig.nim == nim and gConfig.edit:
+  if check == false and gConfig.edit:
     echo "Created " & codefile & ".nim"
 
   while true:
-    if check == false and gConfig.nim == nim and gConfig.edit:
+    if check == false and gConfig.edit:
       if readLineFromStdin("\nPress any key to run, q to quit: ").strip().
         toLowerAscii().strip() == "q":
         break
@@ -216,7 +216,7 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
     except OSError:
       result = "Failed to compile"
 
-    if not gConfig.edit or gConfig.nim != nim:
+    if not gConfig.edit:
       break
 
   # Wait for rmdir since process was killed
@@ -525,7 +525,8 @@ proc loadCfg() =
 
       if cfg.hasKey("ignore"):
         for key in cfg["ignore"].keys:
-          gIgnore.add(key)
+          if key.len() > 0 and key[0] != '#':
+            gIgnore.add(key.split(" ")[0])
 
       break
 
