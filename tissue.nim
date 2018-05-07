@@ -533,6 +533,9 @@ proc loadCfg() =
             if cfg["config"][key] == "true":
               if key == "descending":
                 gConfig.direction = "desc"
+              elif key == "edit":
+                gConfig.edit = true
+                gConfig.foreground = true
               elif key == "foreground":
                 gConfig.foreground = true
               elif key == "force":

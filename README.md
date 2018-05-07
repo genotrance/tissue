@@ -1,3 +1,27 @@
+# Installation
+
+- Install Nim
+- Build temporary compiler for testing
+
+```
+cd path/to/nimdir
+koch temp
+```
+
+- Install tissue
+
+```
+nimble install tissue
+
+  OR
+
+git clone https://github.com/genotrance/tissue
+cd tissue
+nimble install -y
+```
+
+- Setup tissue configuration file with `nimdir` and any default preferred flags.
+
 # Examples
 
 ```
@@ -106,6 +130,7 @@ to save some keystrokes. CLI always overrides cfg file.
 nimdir = "path/to/nim/dir"
 tokenfile = "path/to/auth/token/file"
 descending = true
+edit = true
 foreground = true
 force = true
 noncrash = true
