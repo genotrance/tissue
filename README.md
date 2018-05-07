@@ -37,6 +37,11 @@ Run in interactive mode - wait before running `nim` so that snippet or `nim` can
 be edited prior to test. Allow reruns until told to quit. Helpful to debug the
 snippet or `nim` code
 
+```
+tissue -n 1234
+```
+Run on issue 1234 and ignore checks for crash reports
+
 # Usage
 
 ```
@@ -82,6 +87,7 @@ Settings:
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
+  -n      ignore check for compiler crash    [default: false]
   -T#     timeout before process is killed   [default: 10]
 
 Pages:
@@ -99,6 +105,12 @@ to save some keystrokes. CLI always overrides cfg file.
 [config]
 nimdir = "path/to/nim/dir"
 tokenfile = "path/to/auth/token/file"
+descending = true
+foreground = true
+force = true
+noncrash = true
+verbose = true
+write = true
 
 [ignore]
 issueid1

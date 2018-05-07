@@ -4,7 +4,7 @@ import httpclient, json, os, ospaths, osproc, parsecfg, pegs, rdstdin, streams,
 type
   ConfigObj = object
     category, direction, nimdir, nim, nimtemp, token: string
-    comment, debug, edit, foreground, force, pr, verbose, write: bool
+    comment, debug, edit, foreground, force, noncrash, pr, verbose, write: bool
     first, issue, last, per_page, timeout: int
 
 var gConfig {.threadvar.}: ConfigObj
@@ -21,6 +21,7 @@ gConfig = ConfigObj(
   edit: false,
   foreground: false,
   force: false,
+  noncrash: false,
   pr: false,
   verbose: false,
   write: false,
@@ -79,6 +80,7 @@ Settings:
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
+  -n      ignore check for compiler crash    [default: false]
   -T#     timeout before process is killed   [default: 10]
 
 Pages:
@@ -159,6 +161,9 @@ proc isCpp(issue: JsonNode): bool =
 proc isSsl(issue: JsonNode): bool =
   return isMentioned(issue, "ssl")
 
+proc isThread(issue: JsonNode): bool =
+  return isMentioned(issue, "thread")
+
 proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   result = ""
   if nim.len() == 0:
@@ -177,6 +182,9 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
 
   if isSsl(issue):
     cmd &= " -d:ssl "
+
+  if isThread(issue):
+    cmd &= " --threads:on "
 
   if isNewruntime(issue):
     cmd &= "--newruntime "
@@ -309,19 +317,20 @@ proc getSnippet(issue: JsonNode): string =
       notnim = false
       start = -1
       endl = -1
+      mark = ""
       s = 0
       run = ""
       runout = ""
 
-    for mark in @["``` nimrod\n", "```nimrod\n", "``` nim\n", "```nim\n"]:
-      if mark in bodylc:
-        start = bodylc.find(mark) + mark.len()
+    for line in bodylc.splitLines():
+      if line =~ peg"{'```'[ ]*'nim'(rod)?}":
+        start = bodylc.find(matches[0]) + matches[0].len()
         endl = body.find("```", start)
         break
 
     if start == -1:
-      while "```\n" in body[s..^1]:
-        start = body.find("```\n", s) + 4
+      while "```" in body[s..^1]:
+        start = body.find("```", s) + 3
         endl = body.find("```", start)
         if endl == -1:
           break
@@ -377,9 +386,9 @@ proc getCommentOut(crashtype, outverb: string): string =
   of "NOCRASH":
     result = "No longer crashes with #head.\n\n"
   of "CRASHED":
-    result = "Still crashes with #head\n\n"
+    result = "Still crashes with #head, full stacktrace below.\n\n"
   of "TIMEOUT":
-    result = "Times out with #head\n\n"
+    result = "Times out with #head.\n\n"
 
   result &= """
 ```
@@ -435,7 +444,7 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
   if "number" notin issue:
     return
 
-  if isCrash(issue):
+  if gConfig.noncrash or isCrash(issue):
     let snippet = getSnippet(issue)
     var
       crashtype = "NOSNIPT"
@@ -456,7 +465,7 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
     output = crashtype & output
 
     echo output
-    if gConfig.verbose:
+    if gConfig.verbose and outverb.len() != 0:
       echo "\n" & outverb
 
     if gConfig.write:
@@ -520,6 +529,20 @@ proc loadCfg() =
               gConfig.token = readFile(cfg["config"][key]).strip()
             else:
               echo "Bad tokenfile in cfg: " & cfg["config"][key]
+          elif key in @["descending", "foreground", "force", "noncrash", "verbose", "write"]:
+            if cfg["config"][key] == "true":
+              if key == "descending":
+                gConfig.direction = "desc"
+              elif key == "foreground":
+                gConfig.foreground = true
+              elif key == "force":
+                gConfig.force = true
+              elif key == "noncrash":
+                gConfig.noncrash = true
+              elif key == "verbose":
+                gConfig.verbose = true
+              elif key == "write":
+                gConfig.write = true
           else:
             echo "Unknown key in cfg: " & key
 
@@ -551,6 +574,8 @@ proc parseCli() =
       gConfig.foreground = true
     elif param == "-F":
       gConfig.force = true
+    elif param == "-n":
+      gConfig.noncrash = true
     elif param == "-o":
       gConfig.write = true
     elif param == "-p":
