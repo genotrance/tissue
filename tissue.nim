@@ -221,10 +221,13 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
         (result, error) = execCmdTimer(cmd, gConfig.timeout)
       if error == 0:
         try:
+          cmd = codefile
+          if isJS(issue):
+            cmd = "node " & tempDir/"nimcache"/"temp.js"
           if gConfig.foreground:
-            error = execCmd(codefile)
+            error = execCmd(cmd)
           else:
-            (output, error) = execCmdTimer(codefile, gConfig.timeout)
+            (output, error) = execCmdTimer(cmd, gConfig.timeout)
             if output.len() != 0:
               result &= "\n\n" & output
             else:
