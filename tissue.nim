@@ -3,7 +3,7 @@ import httpclient, json, os, ospaths, osproc, parsecfg, pegs, rdstdin, streams,
 
 type
   ConfigObj = object
-    category, direction, nimdir, nim, nimtemp, token: string
+    category, direction, mode, nimdir, nim, nimtemp, token: string
     comment, debug, edit, foreground, force, noncrash, pr, verbose, write: bool
     first, issue, last, per_page, timeout: int
 
@@ -11,6 +11,7 @@ var gConfig {.threadvar.}: ConfigObj
 gConfig = ConfigObj(
   category: "",
   direction: "asc",
+  mode: "",
   nimdir: "",
   nim: "",
   nimtemp: "",
@@ -80,6 +81,7 @@ Settings:
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
+  -mXX    force compiler to check/c/cpp/js   [default: c or as detected]
   -n      ignore check for compiler crash    [default: false]
   -T#     timeout before process is killed   [default: 10]
 
@@ -179,6 +181,8 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
 
   if check:
     cmd &= " check "
+  elif gConfig.mode.len() != 0:
+    cmd &= " $# " % gConfig.mode
   elif isCpp(issue):
     cmd &= " cpp "
   elif isJS(issue):
@@ -222,7 +226,7 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
       if error == 0:
         try:
           cmd = codefile
-          if isJS(issue):
+          if gConfig.mode == "js" or (gConfig.mode.len() == 0 and isJS(issue)):
             cmd = "node " & tempDir/"nimcache"/"temp.js"
           if gConfig.foreground:
             error = execCmd(cmd)
@@ -590,6 +594,8 @@ proc parseCli() =
       gConfig.foreground = true
     elif param == "-F":
       gConfig.force = true
+    elif param[0..<2] == "-m":
+      gConfig.mode = param[2..^1]
     elif param == "-n":
       gConfig.noncrash = true
     elif param == "-o":
