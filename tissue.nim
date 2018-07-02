@@ -164,6 +164,9 @@ proc isSsl(issue: JsonNode): bool =
 proc isThread(issue: JsonNode): bool =
   return isMentioned(issue, "thread")
 
+proc isJS(issue: JsonNode): bool =
+  return isMentioned(issue, " js ")
+
 proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   result = ""
   if nim.len() == 0:
@@ -172,11 +175,14 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   var
     cmd = nim
     error = -1
+    output = ""
 
   if check:
     cmd &= " check "
   elif isCpp(issue):
     cmd &= " cpp "
+  elif isJS(issue):
+    cmd &= " js "
   else:
     cmd &= " c "
 
@@ -218,9 +224,13 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
           if gConfig.foreground:
             error = execCmd(codefile)
           else:
-            (result, error) = execCmdTimer(codefile, gConfig.timeout)
+            (output, error) = execCmdTimer(codefile, gConfig.timeout)
+            if output.len() != 0:
+              result &= "\n\n" & output
+            else:
+              result &= "\n\nRan successfully, returned " & $error
         except OSError:
-          result = "Failed to run"
+          result &= "\n\nFailed to run"
     except OSError:
       result = "Failed to compile"
 
