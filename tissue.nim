@@ -5,7 +5,7 @@ type
   ConfigObj = object
     category, direction, mode, nimdir, nim, nimtemp, token: string
     comment, debug, edit, foreground, force, noncrash, pr, verbose, write: bool
-    first, issue, last, per_page, timeout: int
+    first, issue, last, per_page, snipno, timeout: int
 
 var gConfig {.threadvar.}: ConfigObj
 gConfig = ConfigObj(
@@ -31,6 +31,7 @@ gConfig = ConfigObj(
   issue: 0,
   last: -1,
   per_page: 100,
+  snipno: 1,
   timeout: 10
 )
 
@@ -83,6 +84,7 @@ Settings:
   -F      force write test case if exists    [default: false]
   -mXX    force compiler to check/c/cpp/js   [default: c or as detected]
   -n      ignore check for compiler crash    [default: false]
+  -s#     snippet number                     [default: 1]
   -T#     timeout before process is killed   [default: 10]
 
 Pages:
@@ -220,6 +222,7 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
 
     try:
       if gConfig.foreground:
+        echo "-------- $# --------" % [if nim == gConfig.nim: "OUTPUT" else: "NIMTEMP"]
         error = execCmd(cmd)
       else:
         (result, error) = execCmdTimer(cmd, gConfig.timeout)
@@ -240,6 +243,9 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
           result &= "\n\nFailed to run"
     except OSError:
       result = "Failed to compile"
+
+    if gConfig.foreground:
+      echo "-------------------------\n"
 
     if not gConfig.edit:
       break
@@ -338,20 +344,33 @@ proc getSnippet(issue: JsonNode): string =
       s = 0
       run = ""
       runout = ""
+      snipno = gConfig.snipno
 
     for line in bodylc.splitLines():
       if line =~ peg"{'```'[ ]*'nim'(rod)?}":
-        start = bodylc.find(matches[0]) + matches[0].len()
+        start = bodylc.find(matches[0], s) + matches[0].len()
         endl = body.find("```", start)
+        s = endl + 1
+
+        if snipno > 1:
+          snipno -= 1
+          continue
+
         break
 
     if start == -1:
+      s = 0
+      snipno = gConfig.snipno
       while "```" in body[s..^1]:
         start = body.find("```", s) + 3
         endl = body.find("```", start)
         if endl == -1:
           break
         s = endl + 1
+
+        if snipno > 1:
+          snipno -= 1
+          continue
 
         run = body[start..<endl].strip()
         runout = run(issue, run, gConfig.nim, check=true)
@@ -472,6 +491,11 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
       outverb = ""
 
     if snippet != "":
+      if gConfig.foreground:
+        echo "-------- SNIPPET --------"
+        echo snippet
+        echo "-------------------------\n"
+
       nimout = run(issue, snippet, gConfig.nim)
       nimouttemp = run(issue, snippet, gConfig.nimtemp)
       nimoutlc = nimout.toLowerAscii()
@@ -602,6 +626,10 @@ proc parseCli() =
       gConfig.write = true
     elif param == "-p":
       gConfig.pr = true
+    elif param[0..<2] == "-s":
+      gConfig.snipno = parseInt(param[2..^1])
+      if gConfig.snipno < 1:
+        gConfig.snipno = 1
     elif param[0..<2] == "-T":
       gConfig.timeout = parseInt(param[2..^1])
       if gConfig.first < 1:
