@@ -1,7 +1,10 @@
+Tissue is an automation tool to help debug Nim issues. It can test snippets
+posted in Nim issues and comments on Github and speed up the fixing process.
+
 # Installation
 
 - Install Nim
-- Build temporary compiler for testing
+- Build temporary compiler `nim_temp` if working on compiler issues
 
 ```
 cd path/to/nimdir
@@ -34,12 +37,14 @@ run with `nim` in path and print brief results
 tissue -v -o 1234
 ```
 Run only on issue 1234 and generate verbose output to stdout and `logs/1234.txt`
+including issue details and comments in the generated log file
 
 ```
 tissue ../nimdevel
 ```
 Use `../nimdevel/bin/nim` and `../nimdevel/bin/nim_temp` for test and to create
-and submit test cases
+and submit test cases. This is especially useful if using choosenim since `nim_temp`
+isn't in the path
 
 ```
 tissue -pf5 -pl6 -o
@@ -51,7 +56,7 @@ issues. Use `-pnX` to change page size
 tissue -aerrmsgs 1234 ../nimdevel
 ```
 Create a test case in `../nimdevel/tests/errmsgs/t1234.nim` with snippet loaded
-from Github issue (including any error detection) and run with testament to
+from Github issue (including any error detection) and run with `testament` to
 verify that test passes
 
 ```
@@ -59,17 +64,29 @@ tissue -e 1234
 ```
 Run in interactive mode - wait before running `nim` so that snippet or `nim` can
 be edited prior to test. Allow reruns until told to quit. Helpful to debug the
-snippet or `nim` code
+snippet or `nim` code until it works
 
 ```
-tissue -n 1234
+tissue -n 1234 -s2
 ```
-Run on issue 1234 and ignore checks for crash reports
+Run on second snippet for issue 1234 and ignore checks for crash reports
+
+```
+tissue -c 1234 ~/.nimble/github_api_token
+```
+Post a comment on Github with run details. Requires `tokenfile` to authenticate
+
+```
+tissue -C2 1234 -mjs
+```
+Run test on snippet in the second issue comment and run in Javascript mode
 
 # Usage
 
 ```
-tissue [nimdir] [issueid] [tokenfile] [-dhov] [-fln#]
+Test failing snippets from Nim's issues
+
+tissue [nimdir] [issueid] [tokenfile] [flags]
 
   If <nimdir> specified on command line:
     Look for <nimdir>\bin\nim
@@ -95,6 +112,7 @@ Actions:
             implies running in the foreground
 
   -p      create branch #<issueid>, commit test case (-a), push, create PR
+            NOT YET IMPLEMENTED
             requires -a<cat> and <issueid>
             requires <nimdir> where test case is pushed
             requires <tokenfile> which contains github auth token
@@ -105,6 +123,11 @@ Output:
   -h      this help screen
   -o      write verbose output to logs\issueid.txt
   -v      write verbose output to stdout
+
+Inputs:
+  -C#     get snippet from comment #         [default: 0 = from issue body]
+  -mXX    force compiler to check/c/cpp/js   [default: c or as detected]
+  -s#     snippet number                     [default: 1]
 
 Settings:
   -d      sort in descending order           [default: asc]

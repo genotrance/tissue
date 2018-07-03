@@ -299,9 +299,15 @@ proc getIssue(issue: int): JsonNode =
 
 proc getComments(issue: int): JsonNode =
   decho "Getting issue comments $#" % $issue
-  return newHttpClient(proxy = getProxy()).
-    getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
-    parseJson()
+  try:
+    return newHttpClient(proxy = getProxy()).
+      getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
+      parseJson()
+  except HttpRequestError:
+    discard
+
+  var empty: JsonNode
+  return empty
 
 proc getAuth(token: string): HttpHeaders =
   return newHttpHeaders({"Authorization": "token " & token})
