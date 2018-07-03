@@ -5,7 +5,7 @@ type
   ConfigObj = object
     category, direction, mode, nimdir, nim, nimtemp, token: string
     comment, debug, edit, foreground, force, noncrash, pr, verbose, write: bool
-    first, issue, last, per_page, snipno, timeout: int
+    commno, first, issue, last, per_page, snipno, timeout: int
 
 var gConfig {.threadvar.}: ConfigObj
 gConfig = ConfigObj(
@@ -27,6 +27,7 @@ gConfig = ConfigObj(
   verbose: false,
   write: false,
 
+  commno: 0,
   first: 1,
   issue: 0,
   last: -1,
@@ -77,14 +78,17 @@ Output:
   -o      write verbose output to logs\issueid.txt
   -v      write verbose output to stdout
 
+Inputs:
+  -C#     get snippet from comment #         [default: 0 = from issue body]
+  -mXX    force compiler to check/c/cpp/js   [default: c or as detected]
+  -s#     snippet number                     [default: 1]
+
 Settings:
   -d      sort in descending order           [default: asc]
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
-  -mXX    force compiler to check/c/cpp/js   [default: c or as detected]
   -n      ignore check for compiler crash    [default: false]
-  -s#     snippet number                     [default: 1]
   -T#     timeout before process is killed   [default: 10]
 
 Pages:
@@ -293,6 +297,12 @@ proc getIssue(issue: int): JsonNode =
     getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue).
     parseJson()
 
+proc getComments(issue: int): JsonNode =
+  decho "Getting issue comments $#" % $issue
+  return newHttpClient(proxy = getProxy()).
+    getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
+    parseJson()
+
 proc getAuth(token: string): HttpHeaders =
   return newHttpHeaders({"Authorization": "token " & token})
 
@@ -417,6 +427,22 @@ $#
 -------------------------
 """ % nimouttemp
 
+proc getIssueDiscussion(issue, comments: JsonNode): string =
+  result = """-------- ISSUE --------
+$#
+-----------------------
+""" % issue["body"].getStr()
+
+  var i = 0
+  for comment in comments:
+    i += 1
+    result &= """
+Comment $# by @$#
+
+$#
+-------------------------
+""" % [$i, comment["user"]["login"].getStr(), comment["body"].getStr()]
+
 proc getCommentOut(crashtype, outverb: string): string =
   case crashtype
   of "NOCRASH":
@@ -481,14 +507,23 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
     return
 
   if gConfig.noncrash or isCrash(issue):
-    let snippet = getSnippet(issue)
     var
+      comments: JsonNode
       crashtype = "NOSNIPT"
       nimout = ""
       nimoutlc = ""
       nimouttemp = ""
       output = " - Issue $#: $#" % [$issue["number"], ($issue["title"]).strip(chars={'"', ' '})]
       outverb = ""
+      snippet = ""
+
+    if gConfig.commno != 0 or gConfig.write:
+      comments = getComments(gConfig.issue)
+
+    if gConfig.commno != 0:
+      snippet = getSnippet(comments[gConfig.commno-1])
+    else:
+      snippet = getSnippet(issue)
 
     if snippet != "":
       if gConfig.foreground:
@@ -511,7 +546,8 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
 
     if gConfig.write:
       createDir("logs")
-      writeFile("logs"/crashtype & "-" & $issue["number"] & ".txt", output & "\n\n" & outverb)
+      writeFile("logs"/crashtype & "-" & $issue["number"] & ".txt",
+        output & "\n\n" & outverb & "\n\n" & getIssueDiscussion(issue, comments))
 
     if gConfig.comment:
       commentIssue($issue["number"], getCommentOut(crashtype, outverb), gConfig.token)
@@ -609,6 +645,11 @@ proc parseCli() =
       gConfig.category = param[2..^1]
     elif param == "-c":
       gConfig.comment = true
+    elif param[0..<2] == "-C":
+      gConfig.commno = parseInt(param[2..^1])
+      if gConfig.commno < 0:
+        echo "Bad comment number"
+        quit(1)
     elif param == "-d":
       gConfig.direction = "desc"
     elif param == "-e":
@@ -629,7 +670,8 @@ proc parseCli() =
     elif param[0..<2] == "-s":
       gConfig.snipno = parseInt(param[2..^1])
       if gConfig.snipno < 1:
-        gConfig.snipno = 1
+        echo "Bad snippet number"
+        quit(1)
     elif param[0..<2] == "-T":
       gConfig.timeout = parseInt(param[2..^1])
       if gConfig.first < 1:
