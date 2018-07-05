@@ -410,7 +410,7 @@ proc getSnippet(issue: JsonNode): string =
       result &= body[start..<endl].strip()
 
 proc getCrashType(nimoutlc, nimouttemp: string): string =
-  result = "NOCRASH"
+  result = if gConfig.foreground: "UNKNOWN" else: "NOCRASH"
   if "internal error" in nimoutlc or "illegal storage" in nimoutlc or
     "Stack overflow" in nimouttemp:
     result = "CRASHED"
