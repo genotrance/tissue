@@ -112,7 +112,6 @@ Actions:
             implies running in the foreground
 
   -p      create branch #<issueid>, commit test case (-a), push, create PR
-            NOT YET IMPLEMENTED
             requires -a<cat> and <issueid>
             requires <nimdir> where test case is pushed
             requires <tokenfile> which contains github auth token
@@ -134,6 +133,7 @@ Settings:
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
+  -k      skip test case verification        [default: false]
   -n      ignore check for compiler crash    [default: false]
   -T#     timeout before process is killed   [default: 10]
 

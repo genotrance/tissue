@@ -4,7 +4,7 @@ import httpclient, json, os, ospaths, osproc, parsecfg, pegs, rdstdin, streams,
 type
   ConfigObj = object
     category, direction, mode, nimdir, nim, nimtemp, token: string
-    comment, debug, edit, foreground, force, noncrash, pr, verbose, write: bool
+    comment, debug, edit, foreground, force, noncrash, noverify, pr, verbose, write: bool
     commno, first, issue, last, per_page, snipno, timeout: int
 
 var gConfig {.threadvar.}: ConfigObj
@@ -23,6 +23,7 @@ gConfig = ConfigObj(
   foreground: false,
   force: false,
   noncrash: false,
+  noverify: false,
   pr: false,
   verbose: false,
   write: false,
@@ -88,6 +89,7 @@ Settings:
   -f      run tests in the foreground
             timeouts are no longer enforced
   -F      force write test case if exists    [default: false]
+  -k      skip test case verification        [default: false]
   -n      ignore check for compiler crash    [default: false]
   -T#     timeout before process is killed   [default: 10]
 
@@ -150,6 +152,7 @@ proc execCmdTimer(command: string, timer: int): tuple[output: string, error: int
   result[0] = result[0].strip()
 
 proc isMentioned(issue: JsonNode, search: varargs[string]): bool =
+  result = false
   let
     title = issue["title"].getStr().toLowerAscii()
     body = issue["body"].getStr().toLowerAscii()
@@ -157,8 +160,6 @@ proc isMentioned(issue: JsonNode, search: varargs[string]): bool =
   for srch in search:
     if srch in title or srch in body:
       return true
-
-  return false
 
 proc isNewruntime(issue: JsonNode): bool =
   return isMentioned(issue, "newruntime")
@@ -262,9 +263,9 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
     removeDir(tempDir)
   except:
     decho "Failed to delete " & tempDir
-  return result
 
 proc getProxy(): Proxy =
+  result = nil
   var url = ""
   try:
     if existsEnv("http_proxy"):
@@ -281,9 +282,7 @@ proc getProxy(): Proxy =
     let auth =
       if parsed.username.len > 0: parsed.username & ":" & parsed.password
       else: ""
-    return newProxy($parsed, auth)
-  else:
-    return nil
+    result = newProxy($parsed, auth)
 
 proc getIssues(page = 1): JsonNode =
   decho "Getting page $# @ $# per page" % [$page, $gConfig.per_page]
@@ -303,27 +302,29 @@ proc getComments(issue: int): JsonNode =
     getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
     parseJson()
 
-proc getAuth(token: string): HttpHeaders =
-  return newHttpHeaders({"Authorization": "token " & token})
+proc getAuth(): HttpHeaders =
+  return newHttpHeaders({"Authorization": "token " & gConfig.token})
 
-proc commentIssue(issueid, text, token: string) =
-  var body = %*
-    {
-      "body": text
-    }
+proc commentIssue(issueid, text: string) =
   decho "Commenting on issue " & issueid
+  var
+    body = %*
+      {
+        "body": text
+      }
+    cl = newHttpClient(proxy = getProxy())
 
-  var cl = newHttpClient(proxy = getProxy())
-  cl.headers = getAuth(token)
+  cl.headers = getAuth()
   var res = cl.request("https://api.github.com/repos/nim-lang/nim/issues/$#/comments" % issueid,
     httpMethod = HttpPost, body = $body)
   if "201" notin res.status:
     echo "Failed to create comment"
-    echo res.body
+    decho res.body
 
 proc isCrash(issue: JsonNode): bool =
+  result = false
   if "pull_request" in issue:
-    return false
+    return
 
   let
     title = issue["title"].getStr().toLowerAscii()
@@ -336,8 +337,6 @@ proc isCrash(issue: JsonNode): bool =
   if (title.len() > 4 and (title[0..<4] == "ice " or title[^4..^1] == " ice")) or
     (body.len() > 4 and (body[0..<4] == "ice " or body[^4..^1] == " ice")):
       return true
-
-  return false
 
 proc getSnippet(issue: JsonNode): string =
   result = ""
@@ -462,32 +461,40 @@ $#
 """ % [outverb, execCmdTimer(gConfig.nim & " -v", gConfig.timeout)[0]]
 
 proc buildTestament(): bool =
+  result = true
+  if gConfig.noverify:
+    return
+
+  decho "Building testament"
   var
     cmd = gConfig.nim & " c --taintMode:on -d:nimCoroutines " &
       gConfig.nimdir/"tests"/"testament"/"tester"
     (output, error) = execCmdEx(cmd)
 
-  return error == 0
+  if error != 0:
+    echo output
+    return false
 
 proc testCategory(): bool =
+  decho "Testing " & gConfig.category
   var
     cmd = gConfig.nimdir/"tests"/"testament"/"tester" &
       " \"--nim:" & "compiler"/"nim" & " \" cat " & gConfig.category
     error = 0
 
+  decho cmd
   withDir gConfig.nimdir:
     error = execCmd(cmd)
 
-  echo cmd
   return error == 0
 
 proc addTestcase(issueid, snippet, nimout: string): bool =
+  result = true
   let
     fn = gConfig.nimdir/"tests"/gConfig.category/"t$#.nim" % issueid
 
   if fileExists(fn):
     if not gConfig.force:
-      echo "Test case already exists, not overwriting: " & fn
       return false
 
   var errorStr = ""
@@ -499,7 +506,61 @@ proc addTestcase(issueid, snippet, nimout: string): bool =
 
   writeFile(fn, errorStr & snippet)
 
-  return true
+proc createBranch(issueid: string): bool =
+  decho "Creating branch for " & issueid
+  result = true
+  let
+    fn = "tests"/gConfig.category/"t$#.nim" % issueid
+
+  var
+    cmds = @[
+      # Checkout devel
+      "git checkout devel",
+
+      # Update repo with upstream
+      "git fetch upstream",
+      "git merge upstream/devel",
+      "git push",
+
+      # Create branch
+      "git branch test-" & issueid,
+      "git checkout test-" & issueid,
+
+      # Commit test case and push
+      "git add " & fn,
+      "git commit -m \"Test case for #$#\"" % issueid,
+      "git push origin test-" & issueid,
+
+      # Checkout devel
+      "git checkout devel"
+    ]
+    error = 0
+
+  withDir gConfig.nimdir:
+    for cmd in cmds:
+      echo cmd
+      error = execCmd(cmd)
+      if error != 0:
+        return false
+
+proc createPR(issueid: string): bool =
+  decho "Creating PR for " & issueid
+  result = true
+  var
+    cl = newHttpClient(proxy = getProxy())
+
+  cl.headers = getAuth()
+
+  var
+    res = cl.getContent("https://api.github.com/user").parseJson()
+    user = res["login"].getStr()
+    body="""{"title": "Test case for #$1", "head": "$2:test-$1", "base": "devel"}""" % [issueid, user]
+    pr = cl.request("https://api.github.com/repos/nim-lang/nim/pulls",
+      httpMethod = HttpPost, body = body)
+
+  if "201" notin pr.status:
+    decho pr.body
+    return false
 
 proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
   gConfig = config
@@ -550,11 +611,21 @@ proc checkIssue(issue: JsonNode, config: ConfigObj) {.gcsafe.} =
         output & "\n\n" & outverb & "\n\n" & getIssueDiscussion(issue, comments))
 
     if gConfig.comment:
-      commentIssue($issue["number"], getCommentOut(crashtype, outverb), gConfig.token)
+      commentIssue($issue["number"], getCommentOut(crashtype, outverb))
 
     if gConfig.category.len() != 0:
-      if not addTestcase($issue["number"], snippet, nimout) or not testCategory():
-        echo "Test case failed"
+      if not addTestcase($issue["number"], snippet, nimout):
+        echo "Test case already exists, use -F"
+      elif not gConfig.noverify:
+        if not testCategory():
+          echo "Test verification failed"
+          return
+
+      if gConfig.pr:
+        if not createBranch($issue["number"]):
+          echo "Branch creation failed"
+        elif not createPR($issue["number"]):
+          echo "Failed to create PR"
 
 proc checkAll() =
   var
@@ -659,6 +730,8 @@ proc parseCli() =
       gConfig.foreground = true
     elif param == "-F":
       gConfig.force = true
+    elif param == "-k":
+      gConfig.noverify = true
     elif param[0..<2] == "-m":
       gConfig.mode = param[2..^1]
     elif param == "-n":
@@ -727,6 +800,7 @@ proc parseCli() =
 
       if not buildTestament():
         echo "Failed in building testament"
+        quit(1)
 
   if gConfig.nim == "":
     gConfig.nim = findExe("nim")
