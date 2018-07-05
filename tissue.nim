@@ -87,7 +87,9 @@ Inputs:
 Settings:
   -d      sort in descending order           [default: asc]
   -f      run tests in the foreground
-            timeouts are no longer enforced
+            Timeouts are no longer enforced
+            Output is no longer captured so
+            crash detection isn't possible
   -F      force write test case if exists    [default: false]
   -k      skip test case verification        [default: false]
   -n      ignore check for compiler crash    [default: false]
@@ -244,14 +246,20 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
             (output, error) = execCmdTimer(rcmd, gConfig.timeout)
             if output.len() != 0:
               result &= "\n\n" & output
-            else:
-              result &= "\n\nRan successfully, returned " & $error
+          when defined(windows):
+            if error == -1073741819:
+              result &= "\n\nWindows Access Violation = Illegal storage access"
+          if error == 0:
+            result &= "\n\nRan successfully"
+          else:
+            result &= "\n\nRun failed, returned: " & $error
         except OSError:
           result &= "\n\nFailed to run"
     except OSError:
       result = "Failed to compile"
 
     if gConfig.foreground:
+      echo result
       echo "-------------------------\n"
 
     if not gConfig.edit:

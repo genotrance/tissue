@@ -131,7 +131,9 @@ Inputs:
 Settings:
   -d      sort in descending order           [default: asc]
   -f      run tests in the foreground
-            timeouts are no longer enforced
+            Timeouts are no longer enforced
+            Output is no longer captured so
+            crash detection isn't possible
   -F      force write test case if exists    [default: false]
   -k      skip test case verification        [default: false]
   -n      ignore check for compiler crash    [default: false]
