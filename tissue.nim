@@ -183,6 +183,7 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
 
   var
     cmd = nim
+    rcmd = ""
     error = -1
     output = ""
 
@@ -216,6 +217,10 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
   f.write(snippet)
   f.close()
 
+  rcmd = codefile
+  if gConfig.mode == "js" or (gConfig.mode.len() == 0 and isJS(issue)):
+    rcmd = "node " & tempDir/"nimcache"/"temp.js"
+
   if check == false and gConfig.edit:
     echo "Created " & codefile & ".nim"
 
@@ -233,13 +238,10 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
         (result, error) = execCmdTimer(cmd, gConfig.timeout)
       if error == 0:
         try:
-          cmd = codefile
-          if gConfig.mode == "js" or (gConfig.mode.len() == 0 and isJS(issue)):
-            cmd = "node " & tempDir/"nimcache"/"temp.js"
           if gConfig.foreground:
-            error = execCmd(cmd)
+            error = execCmd(rcmd)
           else:
-            (output, error) = execCmdTimer(cmd, gConfig.timeout)
+            (output, error) = execCmdTimer(rcmd, gConfig.timeout)
             if output.len() != 0:
               result &= "\n\n" & output
             else:
