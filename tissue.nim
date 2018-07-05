@@ -179,7 +179,6 @@ proc isJS(issue: JsonNode): bool =
   return isMentioned(issue, " js ")
 
 proc run(issue: JsonNode, snippet, nim: string, check=false): string =
-  result = ""
   if nim.len() == 0:
     return
 
@@ -234,6 +233,7 @@ proc run(issue: JsonNode, snippet, nim: string, check=false): string =
 
     try:
       if gConfig.foreground:
+        result = ""
         echo "-------- $# --------" % [if nim == gConfig.nim: "OUTPUT" else: "NIMTEMP"]
         error = execCmd(cmd)
       else:
