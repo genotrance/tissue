@@ -27,59 +27,64 @@ nimble install -y
 
 # Examples
 
+Search all open Nim issues for crash reports, download associated code snippets,
+run with `nim` in path and print brief results
 ```
 tissue
 ```
-Search all open Nim issues for crash reports, download associated code snippets,
-run with `nim` in path and print brief results
 
+Run only on issue 1234 and generate verbose output to stdout and `logs/1234.txt`
+including issue details and comments in the generated log file
 ```
 tissue -v -o 1234
 ```
-Run only on issue 1234 and generate verbose output to stdout and `logs/1234.txt`
-including issue details and comments in the generated log file
 
-```
-tissue ../nimdevel
-```
 Use `../nimdevel/bin/nim` and `../nimdevel/bin/nim_temp` for test and to create
 and submit test cases. This is especially useful if using choosenim since `nim_temp`
 isn't in the path
+```
+tissue ../nimdevel
+```
 
+Run tests on only the 5th page of issues on Github where each page contains 100
+issues. Use `-pnX` to change page size
 ```
 tissue -pf5 -pl6 -o
 ```
-Run tests on only the 5th page of issues on Github where each page contains 100
-issues. Use `-pnX` to change page size
 
-```
-tissue -aerrmsgs 1234 ../nimdevel
-```
 Create a test case in `../nimdevel/tests/errmsgs/t1234.nim` with snippet loaded
 from Github issue (including any error detection) and run with `testament` to
 verify that test passes
+```
+tissue -aerrmsgs 1234 ../nimdevel
+```
 
+Create a PR in `nim-lang/Nim` after creating test case out of snippet
 ```
-tissue -e 1234
+tissue -aerrmsgs 1234 ../nimdevel -p -k
 ```
+
 Run in interactive mode - wait before running `nim` so that snippet or `nim` can
 be edited prior to test. Allow reruns until told to quit. Helpful to debug the
 snippet or `nim` code until it works
+```
+tissue -e 1234
+```
 
+Run on second snippet for issue 1234 and ignore checks for crash reports
 ```
 tissue -n 1234 -s2
 ```
-Run on second snippet for issue 1234 and ignore checks for crash reports
 
+Post a comment on Github with run details. Requires `tokenfile` to authenticate
 ```
 tissue -c 1234 ~/.nimble/github_api_token
 ```
-Post a comment on Github with run details. Requires `tokenfile` to authenticate
 
+Run test on snippet in the second issue comment and run in Javascript mode
 ```
 tissue -C2 1234 -mjs
 ```
-Run test on snippet in the second issue comment and run in Javascript mode
 
 # Usage
 
