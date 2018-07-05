@@ -455,7 +455,7 @@ $#
 proc getCommentOut(crashtype, outverb: string): string =
   case crashtype
   of "NOCRASH":
-    result = "No longer crashes with #head.\n\n"
+    result = "No longer crashes with #head. Please confirm if issue is fixed and if snippet should be added as a test case.\n\n"
   of "CRASHED":
     result = "Still crashes with #head, full stacktrace below.\n\n"
   of "TIMEOUT":
