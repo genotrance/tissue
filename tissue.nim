@@ -294,26 +294,38 @@ proc getProxy(): Proxy =
       else: ""
     result = newProxy($parsed, auth)
 
+proc getAuth(): HttpHeaders =
+  return newHttpHeaders({"Authorization": "token " & gConfig.token})
+
 proc getIssues(page = 1): JsonNode =
   decho "Getting page $# @ $# per page" % [$page, $gConfig.per_page]
-  return newHttpClient(proxy = getProxy()).
-    getContent("https://api.github.com/repos/nim-lang/nim/issues?direction=$#&per_page=$#&page=$#" %
-      [gConfig.direction, $gConfig.per_page, $page]).parseJson()
+  var cl = newHttpClient(proxy = getProxy())
+
+  if gConfig.token != "":
+    cl.headers = getAuth()
+
+  return cl.getContent("https://api.github.com/repos/nim-lang/nim/issues?direction=$#&per_page=$#&page=$#" %
+    [gConfig.direction, $gConfig.per_page, $page]).parseJson()
 
 proc getIssue(issue: int): JsonNode =
   decho "Getting issue $#" % $issue
-  return newHttpClient(proxy = getProxy()).
-    getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue).
+  var cl = newHttpClient(proxy = getProxy())
+
+  if gConfig.token != "":
+    cl.headers = getAuth()
+
+  return cl.getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue).
     parseJson()
 
 proc getComments(issue: int): JsonNode =
   decho "Getting issue comments $#" % $issue
-  return newHttpClient(proxy = getProxy()).
-    getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
-    parseJson()
+  var cl = newHttpClient(proxy = getProxy())
 
-proc getAuth(): HttpHeaders =
-  return newHttpHeaders({"Authorization": "token " & gConfig.token})
+  if gConfig.token != "":
+    cl.headers = getAuth()
+
+  return cl.getContent("https://api.github.com/repos/nim-lang/nim/issues/" & $issue & "/comments").
+    parseJson()
 
 proc commentIssue(issueid, text: string) =
   decho "Commenting on issue " & issueid
@@ -508,11 +520,21 @@ proc addTestcase(issueid, snippet, nimout: string): bool =
       return false
 
   var errorStr = ""
-  for line in nimout.splitLines():
-    if line =~ peg"""'temp.nim'\({\d+}', '+\d+\)' Error: '{.+}""":
-      errorStr = "discard \"\"\"\nerrormsg: \"$#\"\nline: $#\n\"\"\"\n\n" %
-        [matches[1], $(parseInt(matches[0])+5)]
-      break
+  if not gConfig.noncrash:
+    for line in nimout.splitLines():
+      if line =~ peg"""'temp.nim'\({\d+}', '+\d+\)' Error: '{.+}""":
+        errorStr = "discard \"\"\"\n  errormsg: \"$#\"\n  line: $#\n\"\"\"\n\n" %
+          [matches[1], $(parseInt(matches[0])+5)]
+        break
+  else:
+    var fout = ""
+    for line in nimout.splitlines():
+      if line.len() == 0 or "Hint:" in line or "temp.nim" in line:
+        continue
+      if "Ran success" in line:
+        break
+      fout &= line & "\n"
+    errorStr = "discard \"\"\"\n  exitcode: 0\n  output: '''$#'''\n\"\"\"\n\n" % fout
 
   writeFile(fn, errorStr & snippet)
 
